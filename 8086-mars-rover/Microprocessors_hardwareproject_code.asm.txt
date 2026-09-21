@@ -1,0 +1,871 @@
+PORTA   EQU 30H
+PORTB   EQU 32H
+PORTC   EQU 34H
+CTRL    EQU 36H
+
+PATH_MAX EQU 20
+
+; Pitch values for Twinkle Twinkle song
+; Smaller number = higher note
+C4      EQU 900
+D4      EQU 800
+E4      EQU 700
+F4      EQU 650
+G4      EQU 570
+A4      EQU 510
+
+data segment
+
+    grid db 64 dup('.')
+
+    row_now db 0
+    col_now db 0
+
+    path    db PATH_MAX dup(0)
+    pathLen db 0
+
+    dummy db 0
+data ends
+
+stack segment
+    dw 128 dup(0)
+stack ends
+
+code segment
+assume cs:code, ds:data, ss:stack
+
+start:
+    mov ax, data
+    mov ds, ax
+
+  
+    call INIT_MAP
+
+    mov dx, CTRL
+    mov al, 88H
+    out dx, al
+
+    ; Blank 7-segment
+    mov dx, PORTA
+    mov al, 0FFH
+    out dx, al
+
+   ;off buzzer
+    mov dx, PORTB
+    mov al, 00H
+    out dx, al
+
+
+    mov dx, PORTC
+    mov al, 00001111B
+    out dx, al
+
+   
+    call TEST_7SEG
+
+MAIN_LOOP:
+    call READ_KEY
+    cmp al, 0
+    je MAIN_LOOP
+
+    ; 5 = Execute
+    cmp al, 5
+    je DO_EXECUTE
+
+    ; 2,4,6,8 = Store movement
+    cmp al, 2
+    je DO_STORE
+
+    cmp al, 4
+    je DO_STORE
+
+    cmp al, 6
+    je DO_STORE
+
+    cmp al, 8
+    je DO_STORE
+
+    jmp MAIN_LOOP
+
+
+DO_STORE:
+    call STORE_MOVE
+    jmp MAIN_LOOP
+
+
+DO_EXECUTE:
+    call EXECUTE_PATH
+    jmp MAIN_LOOP
+
+
+
+; Initialize Original Map
+
+INIT_MAP PROC
+    push ax
+    push cx
+    push si
+
+    ; Fill grid with '.'
+    mov cx, 64
+    mov si, offset grid
+
+CLEAR_GRID:
+    mov byte ptr [si], '.'
+    inc si
+    loop CLEAR_GRID
+
+    mov byte ptr grid[35], 'O'
+    mov byte ptr grid[3],  'O'
+    mov byte ptr grid[29], 'O'
+    mov byte ptr grid[8],  'O'
+    mov byte ptr grid[57], 'O'
+    mov byte ptr grid[4],  'O'
+
+    ; Original Target A positions
+    mov byte ptr grid[7],  'A'
+    mov byte ptr grid[48], 'A'
+
+    ; Original E position
+    mov byte ptr grid[63], 'E'
+
+    ; Original gas station locations
+    mov byte ptr grid[14], 'G'
+    mov byte ptr grid[49], 'G'
+    mov byte ptr grid[19], 'G'
+
+    pop si
+    pop cx
+    pop ax
+    ret
+INIT_MAP ENDP
+
+
+
+STORE_MOVE PROC
+    push ax
+    push bx
+    push si
+
+    mov bl, al
+
+   
+    cmp byte ptr [pathLen], PATH_MAX
+    jae STORE_FULL
+
+
+    mov si, offset path
+    mov al, [pathLen]
+    xor ah, ah
+    add si, ax
+
+    ; Store movement key
+    mov [si], bl
+    inc byte ptr [pathLen]
+
+    ; Display movement while the key is pressed
+    mov al, bl
+    call DISPLAY_MOVE_WHILE_PRESSED
+
+    jmp STORE_DONE
+
+
+STORE_FULL:
+    call WAIT_KEY_RELEASE
+
+
+STORE_DONE:
+    pop si
+    pop bx
+    pop ax
+    ret
+STORE_MOVE ENDP
+
+EXECUTE_PATH PROC
+    push ax
+    push cx
+    push si
+
+    call WAIT_KEY_RELEASE
+
+
+    mov cl, [pathLen]
+    xor ch, ch
+
+    cmp cx, 0
+    je EXEC_DONE
+
+    mov si, offset path
+
+
+;  Check path safety
+
+CHECK_PATH_LOOP:
+    mov al, [si]
+
+    call CHECK_AND_MOVE
+    jc EXEC_CRASH
+
+    inc si
+    loop CHECK_PATH_LOOP
+
+
+
+; Safe path display
+
+    mov cl, [pathLen]
+    xor ch, ch
+    mov si, offset path
+
+DISPLAY_PATH_LOOP:
+    mov al, [si]
+    call DISPLAY_MOVE_KEY
+
+    inc si
+    loop DISPLAY_PATH_LOOP
+
+    ; Success
+    mov byte ptr [pathLen], 0
+    jmp EXEC_DONE
+
+
+EXEC_CRASH:
+    call SHOW_ERROR
+
+    ; Clear path after crash
+    mov byte ptr [pathLen], 0
+
+
+EXEC_DONE:
+    pop si
+    pop cx
+    pop ax
+    ret
+EXECUTE_PATH ENDP
+
+CHECK_AND_MOVE PROC
+    push ax
+    push bx
+    push dx
+    push si
+
+    ; BL = candidate row
+    ; BH = candidate col
+    mov bl, [row_now]
+    mov bh, [col_now]
+
+    cmp al, 2
+    je MOVE_UP
+
+    cmp al, 8
+    je MOVE_DOWN
+
+    cmp al, 4
+    je MOVE_LEFT
+
+    cmp al, 6
+    je MOVE_RIGHT
+
+    ; Invalid movement = crash
+    stc
+    jmp CHECK_DONE
+
+
+MOVE_UP:
+    ; Boundary check before moving
+    cmp bl, 0
+    je CHECK_CRASH
+
+    dec bl
+    jmp VALIDATE_CELL
+
+
+MOVE_DOWN:
+    ; Boundary check before moving
+    cmp bl, 7
+    jae CHECK_CRASH
+
+    inc bl
+    jmp VALIDATE_CELL
+
+
+MOVE_LEFT:
+    ; Boundary check before moving
+    cmp bh, 0
+    je CHECK_CRASH
+
+    dec bh
+    jmp VALIDATE_CELL
+
+
+MOVE_RIGHT:
+    ; Boundary check before moving
+    cmp bh, 7
+    jae CHECK_CRASH
+
+    inc bh
+    jmp VALIDATE_CELL
+
+
+VALIDATE_CELL:
+    ; Calculate index = row * 8 + col
+    mov al, bl
+    mov dl, 8
+    mul dl
+    add al, bh
+    xor ah, ah
+    mov si, ax
+
+  
+    cmp byte ptr grid[si], 'O'
+    je CHECK_CRASH
+
+    ; Safe position: update rover coordinates
+    mov [row_now], bl
+    mov [col_now], bh
+
+    clc
+    jmp CHECK_DONE
+
+
+CHECK_CRASH:
+    stc
+
+
+CHECK_DONE:
+    pop si
+    pop dx
+    pop bx
+    pop ax
+    ret
+CHECK_AND_MOVE ENDP
+
+
+
+DISPLAY_MOVE_KEY PROC
+    push ax
+    push dx
+
+    cmp al, 2
+    je SEG_F
+
+    cmp al, 4
+    je SEG_L
+
+    cmp al, 6
+    je SEG_r
+
+    cmp al, 8
+    je SEG_b
+
+    mov al, 0FFH
+    jmp SEG_SHOW
+
+
+SEG_F:
+    ; F = Forward / Up
+    mov al, 10001110B
+    jmp SEG_SHOW
+
+
+SEG_L:
+    ; L = Left
+    mov al, 11000111B
+    jmp SEG_SHOW
+
+
+SEG_r:
+    ; r = Right
+    mov al, 10101111B
+    jmp SEG_SHOW
+
+
+SEG_b:
+    ; b = Back / Down
+    mov al, 10000011B
+
+
+SEG_SHOW:
+    mov dx, PORTA
+    out dx, al
+
+    call DELAY_1SEC
+
+
+    mov al, 0FFH
+    out dx, al
+
+    call DELAY_200MS
+
+    pop dx
+    pop ax
+    ret
+DISPLAY_MOVE_KEY ENDP
+
+
+
+DISPLAY_MOVE_WHILE_PRESSED PROC
+    push ax
+    push dx
+
+    cmp al, 2
+    je HOLD_SEG_F
+
+    cmp al, 4
+    je HOLD_SEG_L
+
+    cmp al, 6
+    je HOLD_SEG_r
+
+    cmp al, 8
+    je HOLD_SEG_b
+
+    mov al, 0FFH
+    jmp HOLD_SEG_SHOW
+
+
+HOLD_SEG_F:
+    ; F = Forward / Up
+    mov al, 10001110B
+    jmp HOLD_SEG_SHOW
+
+
+HOLD_SEG_L:
+    ; L = Left
+    mov al, 11000111B
+    jmp HOLD_SEG_SHOW
+
+
+HOLD_SEG_r:
+    ; r = Right
+    mov al, 10101111B
+    jmp HOLD_SEG_SHOW
+
+
+HOLD_SEG_b:
+    ; b = Back / Down
+    mov al, 10000011B
+
+
+HOLD_SEG_SHOW:
+    mov dx, PORTA
+    out dx, al
+
+ 
+    call WAIT_KEY_RELEASE
+
+    ; Blank display after release
+    mov dx, PORTA
+    mov al, 0FFH
+    out dx, al
+
+    pop dx
+    pop ax
+    ret
+DISPLAY_MOVE_WHILE_PRESSED ENDP
+
+
+
+; Show Error
+; Displays E and plays Twinkle Twinkle
+
+SHOW_ERROR PROC
+    push ax
+    push dx
+
+ 
+    mov dx, PORTA
+    mov al, 10000110B
+    out dx, al
+
+  
+    call TEST_BUZZER
+
+
+    mov dx, PORTA
+    mov al, 0FFH
+    out dx, al
+
+    pop dx
+    pop ax
+    ret
+SHOW_ERROR ENDP
+
+
+
+; 7-Segment Test
+
+TEST_7SEG PROC
+    push ax
+    push dx
+
+    mov dx, PORTA
+
+    mov al, 11111110B
+    out dx, al
+    call DELAY_500MS
+
+    mov al, 11111101B
+    out dx, al
+    call DELAY_500MS
+
+    mov al, 11111011B
+    out dx, al
+    call DELAY_500MS
+
+    mov al, 11110111B
+    out dx, al
+    call DELAY_500MS
+
+    mov al, 11101111B
+    out dx, al
+    call DELAY_500MS
+
+    mov al, 11011111B
+    out dx, al
+    call DELAY_500MS
+
+    mov al, 10111111B
+    out dx, al
+    call DELAY_500MS
+
+    mov al, 00H
+    out dx, al
+    call DELAY_1SEC
+
+    mov al, 0FFH
+    out dx, al
+
+    pop dx
+    pop ax
+    ret
+TEST_7SEG ENDP
+
+
+
+; Twinkle Twinkle Buzzer Song
+
+TEST_BUZZER PROC
+    push ax
+    push bx
+    push cx
+    push dx
+
+
+    mov bx, C4
+    mov cx, 120
+    call PLAY_NOTE
+    call NOTE_PAUSE
+
+    mov bx, C4
+    mov cx, 120
+    call PLAY_NOTE
+    call NOTE_PAUSE
+
+    mov bx, G4
+    mov cx, 190
+    call PLAY_NOTE
+    call NOTE_PAUSE
+
+    mov bx, G4
+    mov cx, 190
+    call PLAY_NOTE
+    call NOTE_PAUSE
+
+    mov bx, A4
+    mov cx, 210
+    call PLAY_NOTE
+    call NOTE_PAUSE
+
+    mov bx, A4
+    mov cx, 210
+    call PLAY_NOTE
+    call NOTE_PAUSE
+
+    mov bx, G4
+    mov cx, 380
+    call PLAY_NOTE
+    call LONG_PAUSE
+
+    mov bx, F4
+    mov cx, 170
+    call PLAY_NOTE
+    call NOTE_PAUSE
+
+    mov bx, F4
+    mov cx, 170
+    call PLAY_NOTE
+    call NOTE_PAUSE
+
+    mov bx, E4
+    mov cx, 155
+    call PLAY_NOTE
+    call NOTE_PAUSE
+
+    mov bx, E4
+    mov cx, 155
+    call PLAY_NOTE
+    call NOTE_PAUSE
+
+    mov bx, D4
+    mov cx, 135
+    call PLAY_NOTE
+    call NOTE_PAUSE
+
+    mov bx, D4
+    mov cx, 135
+    call PLAY_NOTE
+    call NOTE_PAUSE
+
+    mov bx, C4
+    mov cx, 240
+    call PLAY_NOTE
+
+    mov dx, PORTB
+    mov al, 00H
+    out dx, al
+
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+TEST_BUZZER ENDP
+
+
+PLAY_NOTE PROC
+    push ax
+    push cx
+    push dx
+
+NOTE_LOOP:
+
+    mov dx, PORTB
+    mov al, 01H
+    out dx, al
+    call TONE_DELAY
+
+    mov dx, PORTB
+    mov al, 00H
+    out dx, al
+    call TONE_DELAY
+
+    loop NOTE_LOOP
+
+    pop dx
+    pop cx
+    pop ax
+    ret
+PLAY_NOTE ENDP
+
+
+
+TONE_DELAY PROC
+    push cx
+
+    mov cx, bx
+
+TD_LOOP:
+    nop
+    loop TD_LOOP
+
+    pop cx
+    ret
+TONE_DELAY ENDP
+
+
+NOTE_PAUSE PROC
+    push cx
+
+    mov cx, 0FFFFH
+
+NP_LOOP:
+    nop
+    loop NP_LOOP
+
+    pop cx
+    ret
+NOTE_PAUSE ENDP
+
+
+LONG_PAUSE PROC
+    call NOTE_PAUSE
+    call NOTE_PAUSE
+    ret
+LONG_PAUSE ENDP
+
+
+READ_KEY PROC
+    push dx
+
+    mov dx, PORTC
+
+    ; Row 1 LOW: keys 1,2,3
+    mov al, 00001110B
+    out dx, al
+    call SETTLE
+    in al, dx
+
+    test al, 00100000B
+    jz KEY_2
+
+    ; Row 2 LOW: keys 4,5,6
+    mov al, 00001101B
+    out dx, al
+    call SETTLE
+    in al, dx
+
+    test al, 00010000B
+    jz KEY_4
+
+    test al, 00100000B
+    jz KEY_5
+
+    test al, 01000000B
+    jz KEY_6
+
+    ; Row 3 LOW: keys 7,8,9
+    mov al, 00001011B
+    out dx, al
+    call SETTLE
+    in al, dx
+
+    test al, 00100000B
+    jz KEY_8
+
+    mov al, 0
+    jmp RK_DONE
+
+
+KEY_2:
+    mov al, 2
+    jmp RK_DONE
+
+
+KEY_4:
+    mov al, 4
+    jmp RK_DONE
+
+
+KEY_5:
+    mov al, 5
+    jmp RK_DONE
+
+
+KEY_6:
+    mov al, 6
+    jmp RK_DONE
+
+
+KEY_8:
+    mov al, 8
+
+
+RK_DONE:
+    push ax
+    mov dx, PORTC
+    mov al, 00001111B
+    out dx, al
+    pop ax
+
+    pop dx
+    ret
+READ_KEY ENDP
+
+
+
+WAIT_KEY_RELEASE PROC
+    push ax
+
+WAIT_LOOP:
+    call READ_KEY
+    cmp al, 0
+    jne WAIT_LOOP
+
+    call DELAY_200MS
+
+    pop ax
+    ret
+WAIT_KEY_RELEASE ENDP
+
+DELAY_1SEC PROC
+    push bx
+    push cx
+
+    mov bx, 8
+
+D1:
+    mov cx, 0FFFFH
+
+D1_LOOP:
+    nop
+    loop D1_LOOP
+
+    dec bx
+    jnz D1
+
+    pop cx
+    pop bx
+    ret
+DELAY_1SEC ENDP
+
+
+DELAY_500MS PROC
+    push bx
+    push cx
+
+    mov bx, 4
+
+D500:
+    mov cx, 0FFFFH
+
+D500_LOOP:
+    nop
+    loop D500_LOOP
+
+    dec bx
+    jnz D500
+
+    pop cx
+    pop bx
+    ret
+DELAY_500MS ENDP
+
+DELAY_200MS PROC
+    push bx
+    push cx
+
+    mov bx, 2
+
+D200:
+    mov cx, 0FFFFH
+
+D200_LOOP:
+    nop
+    loop D200_LOOP
+
+    dec bx
+    jnz D200
+
+    pop cx
+    pop bx
+    ret
+DELAY_200MS ENDP
+
+
+
+SETTLE PROC
+    push cx
+
+    mov cx, 20
+
+SETTLE_LOOP:
+    nop
+    loop SETTLE_LOOP
+
+    pop cx
+    ret
+SETTLE ENDP
+
+code ends
+end start
